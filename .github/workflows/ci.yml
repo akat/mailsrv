@@ -1,0 +1,122 @@
+name: CI
+
+# - Σε κάθε push/PR: shellcheck στα scripts + validation των compose αρχείων.
+# - Σε push στο main: build & push του image εργαλείων ghcr.io/<owner>/mailsrv-tools.
+#   (Ο mail server τρέχει πάντα το επίσημο stalwartlabs/stalwart image. Εδώ ΔΕΝ χτίζεται.)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: |
+          docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.10.0 \
+            --severity=warning scripts/*.sh tools/entrypoint.sh
+
+      - name: Validate compose files
+        env:
+          MAIL_HOSTNAME: mail.example.com
+          MAIL_DOMAIN: example.com
+          STALWART_VERSION: v1.1.1
+        run: |
+          cp .env.example .env
+          docker compose -f docker-compose.yml config -q
+          docker compose -f portainer-stack.yml config -q
+          echo "compose OK"
+
+  tools-image:
+    needs: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/mailsrv-tools
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+            type=ref,event=pr
+
+      - name: Build για test (amd64, local)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: tools/Dockerfile
+          load: true
+          tags: mailsrv-tools:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          docker run --rm mailsrv-tools:test help
+          for b in dig nc curl ss docker bash; do
+            docker run --rm --entrypoint sh mailsrv-tools:test -c "command -v $b" >/dev/null || { echo "λείπει $b"; exit 1; }
+          done
+          # πραγματικό query (το exit code δεν μας νοιάζει, μόνο να τρέχει)
+          docker run --rm mailsrv-tools:test check-dns gmail.com gmail-smtp-in.l.google.com || true
+
+      - name: Build multi-arch & push (μόνο από main)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: tools/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+
+  # Προαιρετικό: μετά από επιτυχημένο CI στο main, ζητά από το Portainer να κάνει
+  # redeploy το stack από το git (αλλαγές στο portainer-stack.yml).
+  # Ενεργοποίηση: repo secret PORTAINER_WEBHOOK_URL = το webhook URL του stack.
+  # Χωρίς το secret, το job απλώς παραλείπεται.
+  deploy:
+    needs: [lint, tools-image]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Portainer stack webhook
+        env:
+          WEBHOOK: ${{ secrets.PORTAINER_WEBHOOK_URL }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "PORTAINER_WEBHOOK_URL δεν έχει οριστεί. Παράλειψη deploy."
+            exit 0
+          fi
+          curl -fsS -X POST --max-time 60 "$WEBHOOK"
+          echo "Portainer redeploy triggered"

@@ -14,6 +14,7 @@ DEST="${BACKUP_DIR:-$(cd "$(dirname "$0")/.." && pwd)/backups}"
 KEEP_DAYS="${KEEP_DAYS:-14}"
 TS="$(date +%Y%m%d-%H%M%S)"
 OUT="stalwart-$TS.tar.gz"
+OWNER="${BACKUP_OWNER:-$(id -u):$(id -g)}"   # uid:gid του αρχείου backup
 
 vol() {
   docker inspect -f "{{range .Mounts}}{{if eq .Destination \"$1\"}}{{.Name}}{{end}}{{end}}" "$CONTAINER"
@@ -31,7 +32,7 @@ docker run --rm \
   -v "$ETC_VOL:/src/etc:ro" \
   -v "$DATA_VOL:/src/data:ro" \
   -v "$DEST:/dest" \
-  alpine:3.20 sh -c "umask 077 && tar -C /src -czf /dest/$OUT etc data && chown $(id -u):$(id -g) /dest/$OUT"
+  alpine:3.20 sh -c "umask 077 && tar -C /src -czf /dest/$OUT etc data && chown $OWNER /dest/$OUT"
 restart
 trap - EXIT
 

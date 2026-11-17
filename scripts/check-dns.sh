@@ -47,10 +47,9 @@ if [[ -n "$DMARC" ]]; then
   grep -qi 'rua=' <<<"$DMARC" || warn "DMARC χωρίς rua= (δεν θα παίρνεις aggregate reports)"
 else bad "Λείπει DMARC (_dmarc.$DOMAIN) - απαραίτητο για Gmail/Yahoo/Outlook"; fi
 
-found=0
 for sel in ${DKIM_SELECTORS:-}; do
   D="$(txt "$sel._domainkey.$DOMAIN")"
-  [[ -n "$D" ]] && { ok "DKIM $sel: ${D:0:60}..."; found=1; } || bad "DKIM $sel._domainkey.$DOMAIN λείπει"
+  [[ -n "$D" ]] && ok "DKIM $sel: ${D:0:60}..." || bad "DKIM $sel._domainkey.$DOMAIN λείπει"
 done
 if [[ -z "${DKIM_SELECTORS:-}" ]]; then
   warn "Δώσε DKIM_SELECTORS=\"sel1 sel2\" για έλεγχο DKIM (οι selectors φαίνονται στο admin, Domains -> DNS records)"

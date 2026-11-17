@@ -10,6 +10,12 @@ version: "3.8"
 #
 # Ροή κίνησης:
 #   HTTPS (admin, JMAP, autoconfig, MTA-STS) -> Traefik :443 -> stalwart:8080 (HTTP)
+#
+#   ΠΡΟΣΟΧΗ: ο αρχικός setup wizard ΔΕΝ δουλεύει μέσω Traefik ("Client metadata
+#   documents are disabled"). Στο bootstrap mode ο Stalwart απαιτεί το URL του browser
+#   να έχει ίδιο scheme με τη σύνδεση που δέχεται (http). Κάνε τον wizard μέσω SSH tunnel:
+#     ssh -L 8080:127.0.0.1:18080 user@server  ->  http://localhost:8080/admin
+#   Μετά τον wizard + restart, το https://MAIL_HOSTNAME/admin μέσω Traefik δουλεύει.
 #   SMTP/IMAP/Sieve -> published θύρες απευθείας στον Stalwart (ο Traefik δεν μπαίνει
 #   στη μέση, ώστε ο server να βλέπει την πραγματική IP των αποστολέων).
 #   Το cert για SMTP/IMAP το βγάζει ο ίδιος ο Stalwart (ACME DNS-01), όχι ο Traefik.
@@ -32,9 +38,16 @@ services:
       # θα έβλεπε την IP του gateway. Γι' αυτό δεν βάζουμε AAAA στο MAIL_HOSTNAME.
       - "0.0.0.0:25:25"       # SMTP (εισερχόμενα από άλλους servers)
       - "0.0.0.0:465:465"     # SMTPS submission (clients)
-      - "0.0.0.0:587:587"     # Submission STARTTLS (clients)
       - "0.0.0.0:993:993"     # IMAPS
       - "0.0.0.0:4190:4190"   # ManageSieve (φίλτρα / auto-reply)
+      # 587: ο Stalwart v1 ΔΕΝ φτιάχνει listener 587 από προεπιλογή (μόνο 465).
+      # Αν τον προσθέσεις στο admin (Network -> Listeners), ξεσχολίασε:
+      # - "0.0.0.0:587:587"
+      #
+      # Setup wizard / πρόσβαση έκτακτης ανάγκης, ΜΟΝΟ από τον localhost του server
+      # (μέσω SSH tunnel, βλ. πάνω). Δεν εκτίθεται στο internet.
+      # Host port 18080 (όχι 8080, που συνήθως την έχει άλλο service). Αλλάζει με ADMIN_LOCAL_PORT.
+      - "127.0.0.1:${ADMIN_LOCAL_PORT:-18080}:8080"
     volumes:
       - stalwart-etc:/etc/stalwart
       - stalwart-data:/var/lib/stalwart
@@ -57,7 +70,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
-      - "traefik.http.routers.stalwart.rule=Host(`${MAIL_HOSTNAME}`) || Host(`mta-sts.${MAIL_DOMAIN:?MAIL_DOMAIN is required}`) || Host(`autoconfig.${MAIL_DOMAIN}`) || Host(`autodiscover.${MAIL_DOMAIN}`)"
+      - "traefik.http.routers.stalwart.rule=Host(`${MAIL_HOSTNAME}`) || Host(`mta-sts.${MAIL_DOMAIN:?MAIL_DOMAIN is required}`) || Host(`autoconfig.${MAIL_DOMAIN}`) || Host(`autodiscover.${MAIL_DOMAIN}`) || Host(`ua-auto-config.${MAIL_DOMAIN}`)"
       - "traefik.http.routers.stalwart.entrypoints=websecure"
       - "traefik.http.routers.stalwart.tls.certresolver=le"
       - "traefik.http.services.stalwart.loadbalancer.server.port=8080"
@@ -73,13 +86,97 @@ services:
       # - "traefik.http.routers.stalwart-acme.priority=10000"
       # - "traefik.http.routers.stalwart-acme.service=stalwart"
     networks:
-      - default   # δικό του δίκτυο για published θύρες και εξερχόμενα
-      - proxy     # μόνο για να το βλέπει ο Traefik
+      default:    # δικό του δίκτυο για published θύρες και εξερχόμενα
+      proxy:      # μόνο για να το βλέπει ο Traefik
+      mailnet:    # ιδιωτικό δίκτυο με το webmail
+        aliases:
+          # Το webmail συνδέεται στο ίδιο hostname με τους clients, ώστε να ταιριάζει
+          # με το cert, αλλά απευθείας στο container (όχι μέσω της δημόσιας IP).
+          - ${MAIL_HOSTNAME}
+
+  # Webmail: https://webmail.<MAIL_DOMAIN>
+  # Συνδέεται στον Stalwart με IMAPS 993 / SMTPS 465 / Sieve 4190 μέσω του mailnet.
+  # Το domain MAIL_DOMAIN ρυθμίζεται αυτόματα σε κάθε εκκίνηση (όχι από admin panel).
+  snappymail:
+    image: djmaze/snappymail:${SNAPPYMAIL_VERSION:-v2.38.2.1}
+    container_name: snappymail
+    restart: unless-stopped
+    depends_on:
+      - stalwart
+    environment:
+      UPLOAD_MAX_SIZE: 25M
+      MEMORY_LIMIT: 256M
+      SECURE_COOKIES: "true"
+      TZ: ${TZ:-Europe/Athens}
+    volumes:
+      - snappymail-data:/var/lib/snappymail
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        D=/var/lib/snappymail/_data_/_default_
+        mkdir -p $$D/domains
+        chown -R www-data:www-data /var/lib/snappymail
+        if [ ! -f $$D/configs/application.ini ]; then
+          su - www-data -s /bin/sh -c 'php /snappymail/index.php' > /dev/null
+        fi
+        # Admin panel της SnappyMail κλειστό (δεν χρειάζεται: το domain ρυθμίζεται εδώ).
+        sed -i 's/^allow_admin_panel = .*/allow_admin_panel = ${SNAPPYMAIL_ADMIN_PANEL:-Off}/' $$D/configs/application.ini
+        cat > $$D/domains/${MAIL_DOMAIN}.json <<'EOF'
+        {
+          "IMAP": {"host": "${MAIL_HOSTNAME}", "port": 993, "type": 1, "timeout": 300,
+                   "shortLogin": false, "lowerLogin": true, "sasl": ["PLAIN", "LOGIN"],
+                   "ssl": {"verify_peer": false, "verify_peer_name": false, "allow_self_signed": true,
+                           "SNI_enabled": true, "disable_compression": true, "security_level": 1},
+                   "disabled_capabilities": [], "use_expunge_all_on_delete": false,
+                   "fast_simple_search": true, "force_select": false, "message_all_headers": false,
+                   "message_list_limit": 10000, "search_filter": ""},
+          "SMTP": {"host": "${MAIL_HOSTNAME}", "port": 465, "type": 1, "timeout": 60,
+                   "shortLogin": false, "lowerLogin": true, "sasl": ["PLAIN", "LOGIN"],
+                   "ssl": {"verify_peer": false, "verify_peer_name": false, "allow_self_signed": true,
+                           "SNI_enabled": true, "disable_compression": true, "security_level": 1},
+                   "useAuth": true, "setSender": false, "usePhpMail": false},
+          "Sieve": {"host": "${MAIL_HOSTNAME}", "port": 4190, "type": 2, "timeout": 10,
+                    "shortLogin": false, "lowerLogin": true, "sasl": ["PLAIN", "LOGIN"],
+                    "ssl": {"verify_peer": false, "verify_peer_name": false, "allow_self_signed": true,
+                            "SNI_enabled": true, "disable_compression": true, "security_level": 1},
+                    "enabled": true},
+          "whiteList": ""
+        }
+        EOF
+        exec /entrypoint.sh
+    # TLS verify κλειστό: η σύνδεση μένει στο ιδιωτικό mailnet (container -> container)
+    # και ο Stalwart έχει self-signed cert μέχρι να βγει το Let's Encrypt.
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.routers.snappymail.rule=Host(`webmail.${MAIL_DOMAIN}`)"
+      - "traefik.http.routers.snappymail.entrypoints=websecure"
+      - "traefik.http.routers.snappymail.tls.certresolver=le"
+      - "traefik.http.services.snappymail.loadbalancer.server.port=8888"
+      - "com.centurylinklabs.watchtower.enable=false"
+    networks:
+      - mailnet
+      - proxy
 
 volumes:
   stalwart-etc:
   stalwart-data:
+  snappymail-data:
 
 networks:
   proxy:
     external: true
+  # Σταθερό subnet: στον Stalwart βάλε αυτό το subnet στα Allowed IPs, αλλιώς λάθος
+  # logins ενός χρήστη στο webmail μπορεί να μπλοκάρουν την IP του webmail για ΟΛΟΥΣ.
+  # Εκτός των pools του Docker (172.17-31.x, 192.168.x). Αν συγκρούεται, άλλαξε MAILNET_SUBNET.
+  mailnet:
+    ipam:
+      config:
+        - subnet: ${MAILNET_SUBNET:-10.253.53.0/28}

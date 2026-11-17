@@ -7,12 +7,15 @@ TLS-RPT, DANE και αυτόματα πιστοποιητικά Let's Encrypt.
 Υπάρχουν δύο τρόποι εγκατάστασης:
 
 - **Standalone** (`docker-compose.yml`): ο Stalwart έχει όλο τον server, μαζί με τις θύρες 80/443. Ακολούθησε αυτό το README.
+- **Νέα εγκατάσταση βήμα προς βήμα (Portainer + Traefik):** **[INSTALL.md](INSTALL.md)**, ξεκίνα από εδώ.
 - **Portainer + κοινός Traefik** (`portainer-stack.yml`): ο Traefik κρατά τις 80/443 και ο Stalwart ανοίγει μόνο τις θύρες mail. Δες το **[PORTAINER.md](PORTAINER.md)**.
 
 ```
 docker-compose.yml     standalone: ένα service, network_mode: host, δύο named volumes
 portainer-stack.yml    Portainer stack πίσω από Traefik (network proxy, resolver le)
-PORTAINER.md           οδηγός για το Portainer/Traefik σενάριο
+PORTAINER.md           οδηγός για το Portainer/Traefik σενάριο, image εργαλείων, GitOps
+tools/                 Dockerfile + entrypoint του image εργαλείων (mailsrv-tools)
+.github/workflows/     CI: shellcheck, compose validation, build/push mailsrv-tools, deploy
 .env.example           έκδοση, hostname, (προαιρετικός) recovery admin
 scripts/preflight.sh   έλεγχοι server πριν το πρώτο up (PTR, θύρα 25, blacklists, ελεύθερες θύρες)
 scripts/check-dns.sh   έλεγχος MX/SPF/DKIM/DMARC/MTA-STS/TLS-RPT/SRV
