@@ -1,0 +1,53 @@
+# Stalwart Mail Server (SMTP / IMAP / JMAP / ManageSieve + web admin)
+#
+# Γιατί network_mode: host
+#   - Ο server βλέπει την πραγματική IP του αποστολέα (απαραίτητο για SPF,
+#     DNSBL, rate-limit, auto-ban). Με bridge + docker-proxy (π.χ. σε IPv6)
+#     όλες οι συνδέσεις φαίνονται να έρχονται από το gateway του Docker.
+#   - Τα εξερχόμενα φεύγουν από την IP του host, που έχει το σωστό PTR.
+#   - Το ufw/nftables του host ισχύει κανονικά (στο bridge mode το Docker
+#     παρακάμπτει το ufw).
+#
+# Θύρες που ανοίγει ο Stalwart στον host:
+#   25   SMTP (εισερχόμενα από άλλους servers)
+#   465  SMTPS submission (implicit TLS) - clients
+#   587  Submission (STARTTLS) - clients
+#   993  IMAPS
+#   4190 ManageSieve (φίλτρα / auto-reply)
+#   443  HTTPS: web admin, JMAP, autoconfig, MTA-STS, ACME tls-alpn-01
+#   8080 HTTP: setup wizard / admin - ΜΟΝΟ μέσω SSH tunnel, κλειστή στο firewall
+
+name: mailsrv
+
+services:
+  stalwart:
+    image: stalwartlabs/stalwart:${STALWART_VERSION:?set STALWART_VERSION in .env}
+    container_name: stalwart
+    restart: unless-stopped
+    network_mode: host
+    env_file: .env
+    environment:
+      TZ: ${TZ:-Europe/Athens}
+    volumes:
+      - stalwart-etc:/etc/stalwart
+      - stalwart-data:/var/lib/stalwart
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    stop_grace_period: 60s
+    # ΟΧΙ no-new-privileges: ο Stalwart τρέχει ως non-root και ανοίγει τις
+    # θύρες <1024 μέσω file capability (setcap), που το no-new-privileges ακυρώνει.
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  stalwart-etc:
+  stalwart-data:

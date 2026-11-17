@@ -1,0 +1,85 @@
+version: "3.8"
+
+# Production mail stack (Stalwart) πίσω από τον κοινό Traefik
+# (network "proxy", Let's Encrypt resolver "le", entrypoint "websecure").
+#
+# Stack environment variables στο Portainer (βλ. portainer-stack.env.example):
+#   MAIL_HOSTNAME   π.χ. mail.example.com   (= A record = PTR της IP)
+#   MAIL_DOMAIN     π.χ. example.com
+#   STALWART_VERSION, TZ, STALWART_RECOVERY_ADMIN (προαιρετικό)
+#
+# Ροή κίνησης:
+#   HTTPS (admin, JMAP, autoconfig, MTA-STS) -> Traefik :443 -> stalwart:8080 (HTTP)
+#   SMTP/IMAP/Sieve -> published θύρες απευθείας στον Stalwart (ο Traefik δεν μπαίνει
+#   στη μέση, ώστε ο server να βλέπει την πραγματική IP των αποστολέων).
+#   Το cert για SMTP/IMAP το βγάζει ο ίδιος ο Stalwart (ACME DNS-01), όχι ο Traefik.
+
+services:
+  stalwart:
+    image: stalwartlabs/stalwart:${STALWART_VERSION:-v1.1.1}
+    container_name: stalwart
+    hostname: ${MAIL_HOSTNAME:?MAIL_HOSTNAME is required}
+    restart: unless-stopped
+    environment:
+      STALWART_HOSTNAME: ${MAIL_HOSTNAME}
+      # Τα URLs που δίνει ο server (JMAP, autoconfig, OAuth) να είναι https://<host>, όχι :8080
+      STALWART_PUBLIC_URL: https://${MAIL_HOSTNAME}
+      STALWART_RECOVERY_ADMIN: ${STALWART_RECOVERY_ADMIN:-}
+      TZ: ${TZ:-Europe/Athens}
+    ports:
+      # Μόνο IPv4: έτσι κάθε σύνδεση έρχεται με την πραγματική IP του αποστολέα
+      # (μέσω DNAT). Σε IPv6 το Docker θα περνούσε από docker-proxy και ο server
+      # θα έβλεπε την IP του gateway. Γι' αυτό δεν βάζουμε AAAA στο MAIL_HOSTNAME.
+      - "0.0.0.0:25:25"       # SMTP (εισερχόμενα από άλλους servers)
+      - "0.0.0.0:465:465"     # SMTPS submission (clients)
+      - "0.0.0.0:587:587"     # Submission STARTTLS (clients)
+      - "0.0.0.0:993:993"     # IMAPS
+      - "0.0.0.0:4190:4190"   # ManageSieve (φίλτρα / auto-reply)
+    volumes:
+      - stalwart-etc:/etc/stalwart
+      - stalwart-data:/var/lib/stalwart
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    stop_grace_period: 60s
+    # ΟΧΙ no-new-privileges: ο Stalwart τρέχει ως non-root και ανοίγει τις
+    # θύρες <1024 μέσω file capability (setcap), που το no-new-privileges ακυρώνει.
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.routers.stalwart.rule=Host(`${MAIL_HOSTNAME}`) || Host(`mta-sts.${MAIL_DOMAIN:?MAIL_DOMAIN is required}`) || Host(`autoconfig.${MAIL_DOMAIN}`) || Host(`autodiscover.${MAIL_DOMAIN}`)"
+      - "traefik.http.routers.stalwart.entrypoints=websecure"
+      - "traefik.http.routers.stalwart.tls.certresolver=le"
+      - "traefik.http.services.stalwart.loadbalancer.server.port=8080"
+      # Mail server: ΟΧΙ αυτόματες αναβαθμίσεις. Οι major εκδόσεις έχουν breaking
+      # changes στο config. Αναβάθμιση μόνο χειροκίνητα, μετά από backup.
+      - "com.centurylinklabs.watchtower.enable=false"
+      #
+      # --- Εναλλακτική για το cert του Stalwart, μόνο αν ο DNS πάροχος ΔΕΝ υποστηρίζεται για DNS-01 ---
+      # HTTP-01 μέσω Traefik (port 80). Δουλεύει μόνο αν ο resolver "le" ΔΕΝ χρησιμοποιεί
+      # httpChallenge. Το "web" είναι το όνομα του entrypoint :80 στον Traefik σου.
+      # - "traefik.http.routers.stalwart-acme.rule=Host(`${MAIL_HOSTNAME}`) && PathPrefix(`/.well-known/acme-challenge/`)"
+      # - "traefik.http.routers.stalwart-acme.entrypoints=web"
+      # - "traefik.http.routers.stalwart-acme.priority=10000"
+      # - "traefik.http.routers.stalwart-acme.service=stalwart"
+    networks:
+      - default   # δικό του δίκτυο για published θύρες και εξερχόμενα
+      - proxy     # μόνο για να το βλέπει ο Traefik
+
+volumes:
+  stalwart-etc:
+  stalwart-data:
+
+networks:
+  proxy:
+    external: true
