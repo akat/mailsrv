@@ -97,6 +97,48 @@ ssh -L 8080:127.0.0.1:18080 user@server
 Μετά συνέχισε από το [README §4](README.md#4-dns-records) (DNS records) και το [§5](README.md#5-πριν-βγει-σε-παραγωγή) (mail-tester, Postmaster Tools, warm-up, DMARC).
 Η μόνη διαφορά: **χωρίς AAAA**.
 
+## Επιπλέον domains στον ίδιο server
+
+Κάθε επιπλέον domain χρησιμοποιεί τον ίδιο mail server (`MAIL_HOSTNAME`). Δεν χρειάζεται νέα IP, PTR ή cert για SMTP/IMAP. Οι clients συνδέονται στο `mail.example.com`.
+
+1. **Portainer:** πρώτα βάλε τα 4 CNAME του πίνακα παρακάτω, αλλιώς ο Traefik θα αποτύχει να βγάλει cert. Μετά, στο stack, βάλε `MAIL_EXTRA_DOMAIN_1=example.net` (και `_2` για δεύτερο) και κάνε **Update the stack**. Αυτό φτιάχνει τα Traefik routes για MTA-STS/autoconfig και ρυθμίζει το webmail για το νέο domain.
+2. **Stalwart admin:** πρόσθεσε το domain και τους λογαριασμούς. Ο Stalwart βγάζει DKIM και δείχνει τα DNS records που χρειάζεται.
+3. **DNS** του νέου domain, όλα **DNS only**:
+
+   | Type | Name | Content |
+   |---|---|---|
+   | CNAME | `mta-sts`, `autoconfig`, `autodiscover`, `ua-auto-config` | `mail.example.com` |
+   | TXT | DKIM, `_mta-sts`, `_smtp._tls` | ό,τι δείχνει ο Stalwart |
+   | TXT | `_dmarc` | `v=DMARC1; p=none; rua=mailto:postmaster@example.net` |
+   | MX | `@` | `mail.example.com` (**τελευταίο**, βλ. παρακάτω) |
+   | TXT | `@` (SPF) | `v=spf1 mx -all` (**μαζί** με το MX) |
+
+   Χωρίς A record `mail.example.net`.
+4. **Webmail:** οι χρήστες του νέου domain μπαίνουν στο ίδιο `https://webmail.<MAIL_DOMAIN>`.
+
+### Αν το domain έχει ήδη email σε άλλη υπηρεσία (Zoho, Google κ.λπ.)
+
+Η αλλαγή του MX είναι η στιγμή που αλλάζει η λήψη. Η σειρά μετράει:
+
+1. Μια μέρα πριν, κατέβασε το **TTL του MX** στα 5 λεπτά.
+2. Φτιάξε στον Stalwart **όλους** τους λογαριασμούς και τα aliases που υπάρχουν στον παλιό πάροχο. Mail προς διεύθυνση που λείπει θα γυρίσει πίσω.
+3. **Πρώτη αντιγραφή** των mailbox από τον παλιό πάροχο με `imapsync` (βλ. παρακάτω). Ο παλιός πάροχος συνεχίζει να λαμβάνει κανονικά.
+4. **Αλλαγή MX + SPF.** Για μερικές μέρες κράτα στο SPF και τον παλιό πάροχο (π.χ. `v=spf1 mx include:zohomail.eu ~all`), για όσους στέλνουν ακόμα από εκεί.
+5. Μετά από 1–2 ώρες, **δεύτερη αντιγραφή** με `imapsync`. Παίρνει μόνο ό,τι ήρθε στο ενδιάμεσο.
+6. Ρύθμισε ξανά τους clients (Outlook, κινητά) με server `mail.example.com`, θύρες 993/465.
+7. Κλείσε τον παλιό πάροχο μόνο όταν βεβαιωθείς ότι δεν λείπει τίποτα, και βγάλε το `include:` από το SPF.
+
+Αντιγραφή ενός mailbox (από τον server, μία φορά ανά λογαριασμό):
+
+```bash
+docker run --rm --network host gilleslamiral/imapsync imapsync \
+  --host1 imappro.zoho.eu --port1 993 --ssl1 --user1 info@example.net --password1 'ΚΩΔΙΚΟΣ_ZOHO' \
+  --host2 127.0.0.1      --port2 993 --ssl2 --user2 info@example.net --password2 'ΚΩΔΙΚΟΣ_STALWART' \
+  --sslargs2 SSL_verify_mode=0 --automap
+```
+
+Στο Zoho, αν έχει 2FA, χρειάζεται **app password** και πρέπει να είναι ενεργό το IMAP access (Settings → Mail Accounts → IMAP). Τρέξε την ίδια εντολή και τις δύο φορές. Το `imapsync` δεν αντιγράφει δεύτερη φορά ό,τι υπάρχει ήδη.
+
 ## Webmail (SnappyMail): `https://webmail.<MAIL_DOMAIN>`
 
 Το stack περιλαμβάνει το SnappyMail. Συνδέεται στον Stalwart μέσα από το ιδιωτικό δίκτυο `mailnet` (IMAPS 993, SMTPS 465, Sieve 4190), χωρίς να ανοίγει νέες θύρες.

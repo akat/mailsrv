@@ -7,6 +7,7 @@ version: "3.8"
 #   MAIL_HOSTNAME   π.χ. mail.example.com   (= A record = PTR της IP)
 #   MAIL_DOMAIN     π.χ. example.com
 #   STALWART_VERSION, TZ, STALWART_RECOVERY_ADMIN (προαιρετικό)
+#   MAIL_EXTRA_DOMAIN_1, MAIL_EXTRA_DOMAIN_2 (προαιρετικά: επιπλέον domains στον ίδιο server)
 #
 # Ροή κίνησης:
 #   HTTPS (admin, JMAP, autoconfig, MTA-STS) -> Traefik :443 -> stalwart:8080 (HTTP)
@@ -74,6 +75,13 @@ services:
       - "traefik.http.routers.stalwart.entrypoints=websecure"
       - "traefik.http.routers.stalwart.tls.certresolver=le"
       - "traefik.http.services.stalwart.loadbalancer.server.port=8080"
+      # Επιπλέον domains (MAIL_EXTRA_DOMAIN_1/2): MTA-STS και autoconfig/autodiscover.
+      # Μια κενή θέση γυρνά στο MAIL_DOMAIN, δηλαδή ίδια hosts με τον κύριο router (καμία αλλαγή).
+      # Για 3ο domain: πρόσθεσε τα ίδια 4 Host() με MAIL_EXTRA_DOMAIN_3 εδώ και στο webmail.
+      - "traefik.http.routers.stalwart-extra.rule=Host(`mta-sts.${MAIL_EXTRA_DOMAIN_1:-${MAIL_DOMAIN}}`) || Host(`autoconfig.${MAIL_EXTRA_DOMAIN_1:-${MAIL_DOMAIN}}`) || Host(`autodiscover.${MAIL_EXTRA_DOMAIN_1:-${MAIL_DOMAIN}}`) || Host(`ua-auto-config.${MAIL_EXTRA_DOMAIN_1:-${MAIL_DOMAIN}}`) || Host(`mta-sts.${MAIL_EXTRA_DOMAIN_2:-${MAIL_DOMAIN}}`) || Host(`autoconfig.${MAIL_EXTRA_DOMAIN_2:-${MAIL_DOMAIN}}`) || Host(`autodiscover.${MAIL_EXTRA_DOMAIN_2:-${MAIL_DOMAIN}}`) || Host(`ua-auto-config.${MAIL_EXTRA_DOMAIN_2:-${MAIL_DOMAIN}}`)"
+      - "traefik.http.routers.stalwart-extra.entrypoints=websecure"
+      - "traefik.http.routers.stalwart-extra.tls.certresolver=le"
+      - "traefik.http.routers.stalwart-extra.service=stalwart"
       # Mail server: ΟΧΙ αυτόματες αναβαθμίσεις. Οι major εκδόσεις έχουν breaking
       # changes στο config. Αναβάθμιση μόνο χειροκίνητα, μετά από backup.
       - "com.centurylinklabs.watchtower.enable=false"
@@ -145,6 +153,10 @@ services:
           "whiteList": ""
         }
         EOF
+        # Επιπλέον domains: ίδιες ρυθμίσεις (ίδιος server mail.<MAIL_DOMAIN>)
+        for dom in ${MAIL_EXTRA_DOMAIN_1:-} ${MAIL_EXTRA_DOMAIN_2:-}; do
+          cp $$D/domains/${MAIL_DOMAIN}.json $$D/domains/$$dom.json
+        done
         exec /entrypoint.sh
     # TLS verify κλειστό: η σύνδεση μένει στο ιδιωτικό mailnet (container -> container)
     # και ο Stalwart έχει self-signed cert μέχρι να βγει το Let's Encrypt.
